@@ -20,6 +20,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source common functions
 source "$SCRIPT_DIR/ralph-common.sh"
+source "$SCRIPT_DIR/task-parser.sh"
+
+# Source parallel execution (if available)
+if [[ -f "$SCRIPT_DIR/ralph-parallel.sh" ]]; then
+  source "$SCRIPT_DIR/ralph-parallel.sh"
+fi
 
 # =============================================================================
 # GUM DETECTION
@@ -101,6 +107,7 @@ select_options() {
     "Run single iteration first"
     "Work on new branch"
     "Open PR when complete"
+    "Run in parallel mode"
   )
   
   if [[ "$HAS_GUM" == "true" ]]; then
@@ -140,6 +147,18 @@ get_branch_name() {
   else
     read -p "Branch name: " branch
     echo "$branch"
+  fi
+}
+
+# Get max parallel agents using gum or fallback
+get_max_parallel() {
+  if [[ "$HAS_GUM" == "true" ]]; then
+    local value
+    value=$(gum input --header "Max parallel agents:" --placeholder "3" --value "3")
+    echo "${value:-3}"
+  else
+    read -p "Max parallel agents [3]: " value
+    echo "${value:-3}"
   fi
 }
 
@@ -252,6 +271,8 @@ main() {
   
   # Parse selected options
   local run_single_first=false
+  local parallel_mode=false
+  local max_parallel=3
   USE_BRANCH=""
   OPEN_PR=false
   
@@ -271,6 +292,11 @@ main() {
       "Open PR when complete")
         OPEN_PR=true
         echo "✓ Will open PR when complete"
+        ;;
+      "Run in parallel mode")
+        parallel_mode=true
+        max_parallel=$(get_max_parallel)
+        echo "✓ Parallel mode: $max_parallel agents"
         ;;
     esac
   done <<< "$selected_options"
@@ -296,6 +322,7 @@ main() {
   [[ -n "$USE_BRANCH" ]] && echo "  • Branch:     $USE_BRANCH"
   [[ "$OPEN_PR" == "true" ]] && echo "  • Open PR:    Yes"
   [[ "$run_single_first" == "true" ]] && echo "  • Test first: Yes (single iteration)"
+  [[ "$parallel_mode" == "true" ]] && echo "  • Parallel:   $max_parallel agents"
   echo "─────────────────────────────────────────────────────────────────"
   echo ""
   
@@ -400,9 +427,25 @@ main() {
     exit 1
   fi
   
-  # Run full loop directly
-  run_ralph_loop "$workspace" "$SCRIPT_DIR"
-  exit $?
+  # Run parallel or sequential mode
+  if [[ "$parallel_mode" == "true" ]]; then
+    # Check if parallel functions are available
+    if ! type run_parallel_tasks &>/dev/null; then
+      echo "❌ Parallel execution not available (ralph-parallel.sh not found)"
+      exit 1
+    fi
+    
+    # Export settings for parallel execution
+    export MODEL
+    export SKIP_MERGE=false
+    
+    run_parallel_tasks "$workspace" "$max_parallel" "$USE_BRANCH"
+    exit $?
+  else
+    # Run full sequential loop
+    run_ralph_loop "$workspace" "$SCRIPT_DIR"
+    exit $?
+  fi
 }
 
 main "$@"
