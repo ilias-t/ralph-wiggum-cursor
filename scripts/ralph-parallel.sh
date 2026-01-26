@@ -60,6 +60,10 @@ slugify() {
 
 # Acquire a lock so parallel runs don't overlap.
 # Uses an atomic mkdir lock directory for portability.
+# Includes staleness recovery: if the lock is older than LOCK_STALE_MINUTES
+# and the owning PID is dead, auto-steal the lock.
+LOCK_STALE_MINUTES="${LOCK_STALE_MINUTES:-45}"
+
 acquire_parallel_lock() {
   local workspace="${1:-.}"
   local lock_dir="$workspace/$PARALLEL_LOCK_DIR"
@@ -75,12 +79,52 @@ acquire_parallel_lock() {
     return 0
   fi
 
-  echo "❌ Parallel lock already held: $lock_dir" >&2
-  if [[ -f "$lock_dir/pid" ]]; then
-    echo "   pid: $(cat "$lock_dir/pid" 2>/dev/null || true)" >&2
+  # Lock exists - check if stale (dead PID + old enough)
+  local lock_pid lock_created_at
+  lock_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "")
+  lock_created_at=$(cat "$lock_dir/created_at" 2>/dev/null || echo "")
+
+  local is_stale=false
+  if [[ -n "$lock_pid" ]]; then
+    # Check if PID is alive (kill -0 returns 0 if process exists)
+    if ! kill -0 "$lock_pid" 2>/dev/null; then
+      # PID is dead - check age
+      if [[ -n "$lock_created_at" ]]; then
+        local lock_epoch now_epoch age_minutes
+        # Convert ISO timestamp to epoch (works on macOS and Linux)
+        if [[ "$(uname)" == "Darwin" ]]; then
+          lock_epoch=$(date -j -f '%Y-%m-%dT%H:%M:%SZ' "$lock_created_at" '+%s' 2>/dev/null || echo "0")
+        else
+          lock_epoch=$(date -d "$lock_created_at" '+%s' 2>/dev/null || echo "0")
+        fi
+        now_epoch=$(date '+%s')
+        age_minutes=$(( (now_epoch - lock_epoch) / 60 ))
+
+        if [[ "$age_minutes" -ge "$LOCK_STALE_MINUTES" ]]; then
+          is_stale=true
+        fi
+      fi
+    fi
   fi
-  if [[ -f "$lock_dir/created_at" ]]; then
-    echo "   created_at: $(cat "$lock_dir/created_at" 2>/dev/null || true)" >&2
+
+  if [[ "$is_stale" == "true" ]]; then
+    echo "🔓 Stale lock detected (PID $lock_pid dead, age ${age_minutes}m >= ${LOCK_STALE_MINUTES}m). Recovering..." >&2
+    rm -rf "$lock_dir" 2>/dev/null || true
+    # Retry acquisition
+    if mkdir "$lock_dir" 2>/dev/null; then
+      echo "$$" > "$lock_dir/pid" 2>/dev/null || true
+      date -u '+%Y-%m-%dT%H:%M:%SZ' > "$lock_dir/created_at" 2>/dev/null || true
+      trap 'rm -rf "'"$lock_dir"'" 2>/dev/null || true' EXIT INT TERM
+      return 0
+    fi
+  fi
+
+  echo "❌ Parallel lock already held: $lock_dir" >&2
+  if [[ -n "$lock_pid" ]]; then
+    echo "   pid: $lock_pid" >&2
+  fi
+  if [[ -n "$lock_created_at" ]]; then
+    echo "   created_at: $lock_created_at" >&2
   fi
   echo "   If you're sure no run is active, delete: rm -rf \"$lock_dir\"" >&2
   return 1
@@ -211,6 +255,17 @@ $task_desc
 - Focus ONLY on your assigned task
 - Do NOT modify RALPH_TASK.md - that will be handled by the orchestrator
 - Commit frequently so your work is saved
+
+## Conflict Prevention (CRITICAL)
+Do NOT modify these files unless your task EXPLICITLY requires it:
+- README.md, CHANGELOG.md, CONTRIBUTING.md
+- package.json, package-lock.json, pnpm-lock.yaml, yarn.lock
+- pyproject.toml, setup.py, requirements.txt, poetry.lock
+- Cargo.toml, Cargo.lock, go.mod, go.sum
+- .env.example, .gitignore, Makefile, Dockerfile
+
+These are common merge conflict hotspots. If your task does not specifically
+mention updating one of these files, leave them alone.
 
 Begin by reading any relevant files, then implement the task."
   
@@ -729,13 +784,29 @@ run_parallel_tasks() {
 
         git -C "$original_dir" add "RALPH_TASK.md" >/dev/null 2>&1 || true
 
+        # Build a detailed commit message with merged branches for archaeology
+        local commit_body="Run: ${RUN_ID}
+
+Merged branches:"
+        for b in "${merged_branches[@]}"; do
+          commit_body+=$'\n'"  - $b"
+        done
+        commit_body+=$'\n'$'\n'"Tasks completed:"
+        for tid in "${integrated_task_ids[@]}"; do
+          commit_body+=$'\n'"  - $tid"
+        done
+
+        local commit_msg="ralph: mark ${#integrated_task_ids[@]} task(s) complete
+
+$commit_body"
+
         if [[ -n "$git_name" ]] && [[ -n "$git_email" ]]; then
-          git -C "$original_dir" commit -m "ralph: mark tasks complete (${RUN_ID})" >/dev/null 2>&1 || true
+          git -C "$original_dir" commit -m "$commit_msg" >/dev/null 2>&1 || true
         else
           git -C "$original_dir" \
             -c user.name="ralph-parallel" \
             -c user.email="ralph-parallel@localhost" \
-            commit -m "ralph: mark tasks complete (${RUN_ID})" >/dev/null 2>&1 || true
+            commit -m "$commit_msg" >/dev/null 2>&1 || true
         fi
       fi
     fi

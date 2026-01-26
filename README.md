@@ -349,6 +349,31 @@ This avoids “one PR per task” spam while keeping agents isolated.
 - Single complex task that needs focused attention
 - Limited API rate limits
 
+### Recommended Workflow: Parallel + Integration Pass
+
+For best results, structure your work in two phases:
+
+**Phase 1: Parallel execution** (isolated, independent tasks)
+```markdown
+# Tasks
+- [ ] Add user authentication to /api/auth
+- [ ] Create dashboard component
+- [ ] Implement data export feature
+- [ ] Add unit tests for utils/
+```
+
+**Phase 2: Integration pass** (one sequential agent, repo-wide polish)
+```markdown
+# Tasks
+- [ ] Update README with new features
+- [ ] Bump version in package.json
+- [ ] Update CHANGELOG
+- [ ] Fix any integration issues from parallel work
+```
+
+This pattern maximizes parallelism while avoiding merge conflicts on shared files.
+The integration pass runs after parallel agents finish and handles all "touch everything" work.
+
 **Worktree structure:**
 ```
 project/
