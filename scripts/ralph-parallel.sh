@@ -464,6 +464,43 @@ run_parallel_tasks() {
   local worktree_base=$(get_worktree_base "$workspace")
   local original_dir=$(cd "$workspace" && pwd)
   
+  # =========================================================================
+  # PREFLIGHT CHECK: Ensure RALPH_TASK.md is tracked
+  # =========================================================================
+  # Parallel mode copies RALPH_TASK.md to worktrees. If it's untracked on the
+  # base branch, worktrees won't have it and agents will fail.
+  
+  local untracked_files
+  untracked_files=$(git -C "$original_dir" status --porcelain -- "RALPH_TASK.md" 2>/dev/null | grep '^??' || true)
+  
+  if [[ -n "$untracked_files" ]]; then
+    echo ""
+    echo "❌ RALPH_TASK.md is untracked (not committed to git)."
+    echo ""
+    echo "   Parallel mode requires RALPH_TASK.md to be committed so worktrees can access it."
+    echo ""
+    echo "   To fix, run:"
+    echo ""
+    echo "     git add RALPH_TASK.md"
+    echo "     git commit -m \"chore: init ralph task file\""
+    echo ""
+    echo "   (Optional: also add .cursor/ralph-scripts if present)"
+    echo ""
+    return 1
+  fi
+  
+  # Optional: warn about uncommitted changes to RALPH_TASK.md (not fatal, but surprising)
+  local modified_files
+  modified_files=$(git -C "$original_dir" status --porcelain -- "RALPH_TASK.md" 2>/dev/null | grep '^ M\|^M \|^MM' || true)
+  
+  if [[ -n "$modified_files" ]]; then
+    echo ""
+    echo "⚠️  RALPH_TASK.md has uncommitted changes."
+    echo "   Worktrees will use the last committed version, not your local edits."
+    echo "   Consider committing first: git add RALPH_TASK.md && git commit -m \"update tasks\""
+    echo ""
+  fi
+  
   echo ""
   echo "═══════════════════════════════════════════════════════════════════"
   echo "🚀 Parallel Execution: Up to $max_parallel agents"
