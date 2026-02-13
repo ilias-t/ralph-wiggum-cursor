@@ -54,17 +54,17 @@ select_model() {
   local current_model="$1"
   local keep_current_label="Keep current (${current_model})"
   local model_options=("$keep_current_label" "${MODELS[@]}")
+  local selected=""
 
   if [[ "$HAS_GUM" == "true" ]]; then
-    local selected
-    selected=$(gum choose --header "Select model:" "${model_options[@]}")
-    
+    # Keep all interactive UI in stderr; only emit the final model on stdout.
+    selected="$(gum choose --header "Select model:" "${model_options[@]}" || true)"
+
     if [[ "$selected" == "$keep_current_label" ]]; then
       selected="$current_model"
     elif [[ "$selected" == "Custom..." ]]; then
-      selected=$(gum input --placeholder "Enter model name" --value "$current_model")
+      selected="$(gum input --placeholder "Enter model name" --value "$current_model" || true)"
     fi
-    echo "${selected:-$current_model}"
   else
     echo "" >&2
     echo "Select model:" >&2
@@ -89,11 +89,22 @@ select_model() {
         read -p "Enter model name [$current_model]: " selected
         selected="${selected:-$current_model}"
       fi
-      echo "$selected"
     else
-      echo "$current_model"
+      echo "Invalid choice. Keeping current model." >&2
+      selected="$current_model"
     fi
   fi
+
+  selected="${selected:-$current_model}"
+
+  # Defensive guard: keep current model if selection is malformed.
+  local invalid_reason=""
+  if invalid_reason="$(model_value_invalid_reason "$selected")"; then
+    echo "Invalid model selection ($invalid_reason). Keeping current model." >&2
+    selected="$current_model"
+  fi
+
+  printf '%s\n' "$selected"
 }
 
 # Get max iterations using gum or fallback
@@ -369,6 +380,12 @@ main() {
     # Run just one iteration
     local signal
     signal=$(run_iteration "$workspace" "1" "" "$SCRIPT_DIR")
+
+    if [[ "$signal" == "CONFIG_ERROR" ]]; then
+      echo ""
+      echo "❌ Invalid runtime configuration. See .ralph/errors.log for details."
+      exit 1
+    fi
     
     # Check result
     local task_status
@@ -430,6 +447,11 @@ main() {
         "GUTTER")
           log_progress "$workspace" "**Session $iteration ended** - 🚨 GUTTER"
           echo "🚨 Gutter detected. Check .ralph/errors.log"
+          exit 1
+          ;;
+        "CONFIG_ERROR")
+          log_progress "$workspace" "**Session $iteration ended** - ❌ CONFIG_ERROR (invalid runtime configuration)"
+          echo "❌ Invalid runtime configuration. Check .ralph/errors.log"
           exit 1
           ;;
         *)
